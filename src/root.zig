@@ -8,6 +8,8 @@ pub const Level = tracing.Level;
 pub const LevelFlags = tracing.LevelFlags;
 pub const ProbeKind = tracing.ProbeKind;
 pub const ProbeEvent = tracing.ProbeEvent;
+pub const Field = tracing.Field;
+pub const FieldValue = tracing.FieldValue;
 pub const Subscriber = tracing.Subscriber;
 pub const FileSubscriber = tracing.FileSubscriber;
 
@@ -31,22 +33,55 @@ pub const config: Config = .{
     .backend_tracing = opts.backend_tracing,
 };
 
+fn toFieldValue(value: anytype) FieldValue {
+    const T = @TypeOf(value);
+    return switch (@typeInfo(T)) {
+        .int => |info| switch (info.signedness) {
+            .signed => FieldValue{ .int = @intCast(value) },
+            .unsigned => FieldValue{ .uint = @intCast(value) },
+        },
+        .comptime_int => if (value < 0)
+            FieldValue{ .int = @intCast(value) }
+        else
+            FieldValue{ .uint = @intCast(value) },
+        .float => FieldValue{ .float = @floatCast(value) },
+        .comptime_float => FieldValue{ .float = @floatCast(value) },
+        .bool => FieldValue{ .boolean = value },
+        .pointer => |p| blk: {
+            if (p.size == .slice and p.child == u8)
+                break :blk FieldValue{ .string = value };
+            if (p.size == .one and comptime @typeInfo(p.child) == .array)
+                if (@typeInfo(p.child).array.child == u8)
+                    break :blk FieldValue{ .string = @as([]const u8, value) };
+            break :blk FieldValue{ .pointer = @intFromPtr(value) };
+        },
+        else => @compileError("unsupported field type: " ++ @typeName(T)),
+    };
+}
+
+fn toFields(comptime fields_info: []const std.builtin.Type.StructField, args: anytype, buf: *[8]Field) []const Field {
+    inline for (fields_info, 0..) |f, i| {
+        buf[i] = .{ .name = f.name, .value = toFieldValue(@field(args, f.name)) };
+    }
+    return buf[0..fields_info.len];
+}
+
 pub fn Span(comptime name: []const u8, comptime Args: type) type {
     return struct {
         args: Args,
 
         pub fn enter(self: @This()) void {
-            const fields = comptime @typeInfo(Args).@"struct".fields;
+            const fields_info = comptime @typeInfo(Args).@"struct".fields;
             if (config.backend_usdt) {
-                usdt.spanEnter(config.provider, name, self.args, fields);
+                usdt.spanEnter(config.provider, name, self.args, fields_info);
             }
             if (config.backend_tracing) {
-                var buf: [256]u8 = undefined;
-                const args_fmt = formatArgs(fields, self.args, buf[0..]);
+                var field_buf: [8]Field = undefined;
+                const fields = toFields(fields_info, self.args, &field_buf);
                 tracing.dispatch(.{
                     .kind = .span_enter,
                     .name = name,
-                    .args_fmt = args_fmt,
+                    .fields = fields,
                     .timestamp = rdtsc_.rdtsc(),
                 });
             }
@@ -61,7 +96,7 @@ pub fn Span(comptime name: []const u8, comptime Args: type) type {
                 tracing.dispatch(.{
                     .kind = .span_exit,
                     .name = name,
-                    .args_fmt = "",
+                    .fields = &[_]Field{},
                     .timestamp = rdtsc_.rdtsc(),
                 });
             }
@@ -77,21 +112,21 @@ pub fn event(comptime level: Level, comptime name: []const u8, args: anytype) vo
     if (comptime !@field(config.level_flags, @tagName(level))) return;
 
     const Args = @TypeOf(args);
-    const fields = comptime switch (@typeInfo(Args)) {
+    const fields_info = comptime switch (@typeInfo(Args)) {
         .@"struct" => |s| s.fields,
         else => @compileError("event args must be a tuple or struct"),
     };
 
     if (config.backend_usdt) {
-        usdt.event(config.provider, level, name, args, fields);
+        usdt.event(config.provider, level, name, args, fields_info);
     }
     if (config.backend_tracing) {
-        var buf: [256]u8 = undefined;
-        const args_fmt = formatArgs(fields, args, buf[0..]);
+        var field_buf: [8]Field = undefined;
+        const fields = toFields(fields_info, args, &field_buf);
         tracing.dispatch(.{
             .kind = .event,
             .name = name,
-            .args_fmt = args_fmt,
+            .fields = fields,
             .timestamp = rdtsc_.rdtsc(),
         });
     }
@@ -101,40 +136,10 @@ pub fn rdtsc() u64 {
     return rdtsc_.rdtsc();
 }
 
-fn isStringType(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .pointer => |p| switch (@typeInfo(p.child)) {
-            .array => |a| a.child == u8,
-            else => p.size == .slice and p.child == u8,
-        },
-        else => false,
-    };
+pub fn setDefaultConsole() void {
+    tracing.setDefaultConsole();
 }
 
-fn formatArgs(comptime fields: []const std.builtin.Type.StructField, args: anytype, buf: []u8) []const u8 {
-    var pos: usize = 0;
-    inline for (fields, 0..) |field, i| {
-        if (i > 0) {
-            if (pos + 2 > buf.len) break;
-            buf[pos] = ',';
-            buf[pos + 1] = ' ';
-            pos += 2;
-        }
-        if (field.name.len > 0) {
-            if (pos + field.name.len + 1 > buf.len) break;
-            for (field.name, 0..) |c, j| buf[pos + j] = c;
-            pos += field.name.len;
-            buf[pos] = '=';
-            pos += 1;
-        }
-        const value = @field(args, field.name);
-        const T = @TypeOf(value);
-        const is_str = comptime isStringType(T);
-        const formatted = if (is_str)
-            std.fmt.bufPrint(buf[pos..], "{s}", .{@as([]const u8, value)}) catch break
-        else
-            std.fmt.bufPrint(buf[pos..], "{any}", .{value}) catch break;
-        pos += formatted.len;
-    }
-    return buf[0..pos];
+pub fn formatFields(writer: *std.Io.Writer, fields: []const Field) std.Io.Writer.Error!void {
+    return tracing.formatFields(writer, fields);
 }

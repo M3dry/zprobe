@@ -26,10 +26,24 @@ pub const ProbeKind = enum(u2) {
     span_exit,
 };
 
+pub const FieldValue = union(enum) {
+    int: i64,
+    uint: u64,
+    float: f64,
+    string: []const u8,
+    boolean: bool,
+    pointer: u64,
+};
+
+pub const Field = struct {
+    name: []const u8,
+    value: FieldValue,
+};
+
 pub const ProbeEvent = struct {
     kind: ProbeKind,
     name: []const u8,
-    args_fmt: []const u8,
+    fields: []const Field,
     timestamp: u64,
 };
 
@@ -70,6 +84,49 @@ pub fn dispatch(event: ProbeEvent) void {
     }
 }
 
+pub fn formatFields(writer: *std.Io.Writer, fields: []const Field) std.Io.Writer.Error!void {
+    for (fields, 0..) |f, i| {
+        if (i > 0) try writer.writeAll(", ");
+        if (f.name.len > 0) {
+            try writer.writeAll(f.name);
+            try writer.writeAll("=");
+        }
+        switch (f.value) {
+            .int => |v| try writer.print("{}", .{v}),
+            .uint => |v| try writer.print("{}", .{v}),
+            .float => |v| try writer.print("{d}", .{v}),
+            .string => |v| try writer.print("{s}", .{v}),
+            .boolean => |v| try writer.print("{}", .{v}),
+            .pointer => |v| try writer.print("0x{x}", .{v}),
+        }
+    }
+}
+
+const console_ctx: u8 = 0;
+
+fn consoleOnProbe(ctx: *anyopaque, event: ProbeEvent) void {
+    _ = ctx;
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    formatFields(&w, event.fields) catch {};
+    const fmt = w.buffered();
+    switch (event.kind) {
+        .event => std.debug.print("[event] {s} {s}\n", .{ event.name, fmt }),
+        .span_enter => std.debug.print("[enter] {s} {s}\n", .{ event.name, fmt }),
+        .span_exit => std.debug.print("[exit]  {s}\n", .{ event.name }),
+    }
+}
+
+pub const console = Subscriber{
+    .name = "zprobe.console",
+    .ctx = @constCast(@ptrCast(&console_ctx)),
+    .onProbe = consoleOnProbe,
+};
+
+pub fn setDefaultConsole() void {
+    Subscriber.register(console);
+}
+
 pub const FileSubscriber = struct {
     writer: std.Io.File.Writer,
     depth: u32,
@@ -87,7 +144,7 @@ pub const FileSubscriber = struct {
         };
     }
 
-    fn print_depth(self: *FileSubscriber) !void {
+    fn printDepth(self: *FileSubscriber) !void {
         for (0..self.depth) |_| {
             try self.writer.interface.writeAll(" ");
         }
@@ -98,12 +155,16 @@ pub const FileSubscriber = struct {
 
         switch (event.kind) {
             .event => {
-                self.print_depth() catch {};
-                self.writer.interface.print("[event] {s} {s}\n", .{ event.name, event.args_fmt }) catch {};
+                self.printDepth() catch {};
+                self.writer.interface.print("[event] {s} ", .{ event.name }) catch {};
+                formatFields(&self.writer.interface, event.fields) catch {};
+                self.writer.interface.print("\n", .{}) catch {};
             },
             .span_enter => {
-                self.print_depth() catch {};
-                self.writer.interface.print("[enter] {s} {s}\n", .{ event.name, event.args_fmt }) catch {};
+                self.printDepth() catch {};
+                self.writer.interface.print("[enter] {s} ", .{ event.name }) catch {};
+                formatFields(&self.writer.interface, event.fields) catch {};
+                self.writer.interface.print("\n", .{}) catch {};
                 self.depth += 1;
             },
             .span_exit => {
