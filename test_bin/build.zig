@@ -7,6 +7,8 @@ pub fn build(b: *std.Build) void {
     const zprobe_mod = b.dependency("zprobe", .{
         .target = target,
         .optimize = optimize,
+        .provider = "test",
+        .backend_usdt = true,
     }).module("root");
 
     const exe_opts: std.Build.ExecutableOptions = .{

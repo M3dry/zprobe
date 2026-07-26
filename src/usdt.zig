@@ -1,8 +1,32 @@
 const std = @import("std");
+const Level = @import("tracing.zig").Level;
 
-pub inline fn probe(comptime zone: []const u8, comptime name: []const u8, args: anytype, comptime args_info: []const std.builtin.Type.StructField) void {
-    if (args_info.len > 8) @compileError("Arg count for a USDT probe is larger than 8");
+pub inline fn event(comptime provider: []const u8, comptime level: Level, comptime name: []const u8, args: anytype, comptime args_info: []const std.builtin.Type.StructField) void {
+    const level_prefix = comptime switch (level) {
+        .err => "error/",
+        .warn => "warn/",
+        .info => "info/",
+        .debug => "debug/",
+        .trace => "trace/",
+    };
+    const usdt_name = level_prefix ++ name;
     const args_string = comptime generateArgsString(args_info);
+    emit(provider, usdt_name, args_string, args, args_info);
+}
+
+pub inline fn spanEnter(comptime provider: []const u8, comptime name: []const u8, args: anytype, comptime args_info: []const std.builtin.Type.StructField) void {
+    const usdt_name = comptime "__span_" ++ name;
+    const args_string = comptime generateArgsString(args_info);
+    emit(provider, usdt_name, args_string, args, args_info);
+}
+
+pub inline fn spanExit(comptime provider: []const u8, comptime name: []const u8) void {
+    const usdt_name = comptime "~__span_" ++ name;
+    emit(provider, usdt_name, "", .{}, &.{});
+}
+
+inline fn emit(comptime provider: []const u8, comptime name: []const u8, comptime args_string: []const u8, args: anytype, comptime args_info: []const std.builtin.Type.StructField) void {
+    if (args_info.len > 7) @compileError("Arg count for a USDT probe is larger than 8");
 
     asm volatile (
         \\ 1:
@@ -12,19 +36,19 @@ pub inline fn probe(comptime zone: []const u8, comptime name: []const u8, args: 
         \\ .balign 4
         \\
         \\ .long 8
-        \\ .long desc_end - desc_start
+        \\ .long desc_end_%= - desc_start_%=
         \\ .long 3
         \\
         \\ .asciz "stapsdt"
         \\
         \\ .balign 4
-        \\ desc_start:
+        \\ desc_start_%=:
         \\ .quad 1b          # probe location
         \\ .quad 0           # base address
         \\ .quad 0           # semaphore address
         \\
         \\ .asciz "
-        ++ zone ++
+        ++ provider ++
         \\"
         \\ .asciz "
         ++ name ++
@@ -34,7 +58,7 @@ pub inline fn probe(comptime zone: []const u8, comptime name: []const u8, args: 
         \\"
         \\
         \\ .balign 4
-        \\ desc_end:
+        \\ desc_end_%=:
         \\
         \\ .popsection
         :
@@ -57,7 +81,7 @@ fn IndexReturn(comptime args_info: []const std.builtin.Type.StructField, comptim
 
 inline fn index(args: anytype, comptime args_info: []const std.builtin.Type.StructField, comptime ix: usize, comptime len: usize) IndexReturn(args_info, ix, len) {
     if (ix >= len) return 0;
-    return args[ix];
+    return @field(args, args_info[ix].name);
 }
 
 fn generateArgsString(comptime fields: []const std.builtin.Type.StructField) []const u8 {
