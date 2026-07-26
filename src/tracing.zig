@@ -72,11 +72,13 @@ pub fn dispatch(event: ProbeEvent) void {
 
 pub const FileSubscriber = struct {
     writer: std.Io.File.Writer,
+    depth: u32,
     subscriber: Subscriber,
 
     pub fn init(dst: *FileSubscriber, io: std.Io, file: std.Io.File, buffer: []u8, name: []const u8) void {
         dst.* = .{
             .writer = file.writer(io, buffer),
+            .depth = 0,
             .subscriber = .{
                 .name = name,
                 .ctx = dst,
@@ -85,13 +87,28 @@ pub const FileSubscriber = struct {
         };
     }
 
+    fn print_depth(self: *FileSubscriber) !void {
+        for (0..self.depth) |_| {
+            try self.writer.interface.writeAll(" ");
+        }
+    }
+
     fn onProbe(ctx: *anyopaque, event: ProbeEvent) void {
         const self: *FileSubscriber = @alignCast(@ptrCast(ctx));
 
-        (switch (event.kind) {
-            .event => self.writer.interface.print("[event] {s} {s}\n", .{ event.name, event.args_fmt }),
-            .span_enter => self.writer.interface.print("[enter] {s} {s}\n", .{ event.name, event.args_fmt }),
-            .span_exit => self.writer.interface.print("[exit] {s}\n", .{ event.name }),
-        }) catch {};
+        switch (event.kind) {
+            .event => {
+                self.print_depth() catch {};
+                self.writer.interface.print("[event] {s} {s}\n", .{ event.name, event.args_fmt }) catch {};
+            },
+            .span_enter => {
+                self.print_depth() catch {};
+                self.writer.interface.print("[enter] {s} {s}\n", .{ event.name, event.args_fmt }) catch {};
+                self.depth += 1;
+            },
+            .span_exit => {
+                self.depth -= 1;
+            },
+        }
     }
 };
