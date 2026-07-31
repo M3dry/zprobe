@@ -70,7 +70,7 @@ pub fn Span(comptime name: []const u8, comptime Args: type) type {
     return struct {
         args: Args,
 
-        pub fn enter(self: @This()) void {
+        pub inline fn enter(self: @This()) void {
             const fields_info = comptime @typeInfo(Args).@"struct".fields;
             if (config.backend_usdt) {
                 usdt.spanEnter(config.provider, name, self.args, fields_info);
@@ -87,7 +87,7 @@ pub fn Span(comptime name: []const u8, comptime Args: type) type {
             }
         }
 
-        pub fn exit(self: @This()) void {
+        pub inline fn exit(self: @This()) void {
             _ = self;
             if (config.backend_usdt) {
                 usdt.spanExit(config.provider, name);
@@ -108,7 +108,7 @@ pub fn span(comptime name: []const u8, args: anytype) Span(name, @TypeOf(args)) 
     return .{ .args = args };
 }
 
-pub fn event(comptime level: Level, comptime name: []const u8, args: anytype) void {
+pub inline fn event(comptime level: Level, comptime name: []const u8, args: anytype) void {
     if (comptime !@field(config.level_flags, @tagName(level))) return;
 
     const Args = @TypeOf(args);

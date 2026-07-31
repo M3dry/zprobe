@@ -11,6 +11,9 @@ pub fn main(init: std.process.Init) !void {
     s.enter();
     defer s.exit();
 
-    zprobe.event(.info, "simulate step", .{ .dt = 0.015, .entity = 42 });
-    zprobe.event(.debug, "broadphase pairs", .{ .count = 240 });
+    zprobe.event(.info, "simulate step", .{ .dt = 0.015, .entity = @intFromPtr(init.arena) });
+    zprobe.event(.debug, "broadcast pairs", .{ .count = 240 });
+
+    const payload: []const u8 = "physics step 42";
+    zprobe.event(.debug, "payload", .{ .data = payload });
 }
