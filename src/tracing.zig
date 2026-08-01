@@ -6,6 +6,16 @@ pub const Level = enum(u3) {
     info,
     debug,
     trace,
+
+    pub fn asText(self: Level) []const u8 {
+        return switch (self) {
+            .err => "error",
+            .warn => "warning",
+            .info => "info",
+            .debug => "debug",
+            .trace => "trace",
+        };
+    }
 };
 
 pub const LevelFlags = packed struct(u5) {
@@ -20,8 +30,8 @@ pub const LevelFlags = packed struct(u5) {
     pub const errors: LevelFlags = .{ .err = true, .warn = false, .info = false, .debug = false, .trace = false };
 };
 
-pub const ProbeKind = enum(u2) {
-    event,
+pub const ProbeKind = union(enum) {
+    event: Level,
     span_enter,
     span_exit,
 };
@@ -102,39 +112,16 @@ pub fn formatFields(writer: *std.Io.Writer, fields: []const Field) std.Io.Writer
     }
 }
 
-const console_ctx: u8 = 0;
-
-fn consoleOnProbe(ctx: *anyopaque, event: ProbeEvent) void {
-    _ = ctx;
-    var buf: [256]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    formatFields(&w, event.fields) catch {};
-    const fmt = w.buffered();
-    switch (event.kind) {
-        .event => std.debug.print("[event] {s} {s}\n", .{ event.name, fmt }),
-        .span_enter => std.debug.print("[enter] {s} {s}\n", .{ event.name, fmt }),
-        .span_exit => std.debug.print("[exit]  {s}\n", .{ event.name }),
-    }
-}
-
-pub const console = Subscriber{
-    .name = "zprobe.console",
-    .ctx = @constCast(@ptrCast(&console_ctx)),
-    .onProbe = consoleOnProbe,
-};
-
-pub fn setDefaultConsole() void {
-    Subscriber.register(console);
-}
-
 pub const FileSubscriber = struct {
     writer: std.Io.File.Writer,
+    terminal_mode: std.Io.Terminal.Mode,
     depth: u32,
     subscriber: Subscriber,
 
     pub fn init(dst: *FileSubscriber, io: std.Io, file: std.Io.File, buffer: []u8, name: []const u8) void {
         dst.* = .{
             .writer = file.writer(io, buffer),
+            .terminal_mode = std.Io.Terminal.Mode.detect(io, file, false, false) catch .no_color,
             .depth = 0,
             .subscriber = .{
                 .name = name,
@@ -144,25 +131,51 @@ pub const FileSubscriber = struct {
         };
     }
 
+    fn terminal(self: *FileSubscriber) std.Io.Terminal {
+        return .{ .writer = &self.writer.interface, .mode = self.terminal_mode };
+    }
+
     fn printDepth(self: *FileSubscriber) !void {
         for (0..self.depth) |_| {
             try self.writer.interface.writeAll(" ");
         }
     }
 
+    fn colorFor(level: Level) std.Io.Terminal.Color {
+        return switch (level) {
+            .err => .red,
+            .warn => .yellow,
+            .info => .green,
+            .debug => .magenta,
+            .trace => .cyan,
+        };
+    }
+
+    fn setTag(t: std.Io.Terminal, color: std.Io.Terminal.Color, text: []const u8) !void {
+        t.setColor(color) catch {};
+        t.setColor(.bold) catch {};
+        try t.writer.writeAll(text);
+        t.setColor(.reset) catch {};
+    }
+
     fn onProbe(ctx: *anyopaque, event: ProbeEvent) void {
         const self: *FileSubscriber = @alignCast(@ptrCast(ctx));
+        const t = self.terminal();
 
         switch (event.kind) {
-            .event => {
+            .event => |level| {
                 self.printDepth() catch {};
-                self.writer.interface.print("[event] {s} ", .{ event.name }) catch {};
+                setTag(t, colorFor(level), "[") catch {};
+                setTag(t, colorFor(level), level.asText()) catch {};
+                setTag(t, colorFor(level), "]") catch {};
+                self.writer.interface.print(" {s} ", .{ event.name }) catch {};
                 formatFields(&self.writer.interface, event.fields) catch {};
                 self.writer.interface.print("\n", .{}) catch {};
             },
             .span_enter => {
                 self.printDepth() catch {};
-                self.writer.interface.print("[enter] {s} ", .{ event.name }) catch {};
+                setTag(t, .cyan, "[enter]") catch {};
+                self.writer.interface.print(" {s} ", .{ event.name }) catch {};
                 formatFields(&self.writer.interface, event.fields) catch {};
                 self.writer.interface.print("\n", .{}) catch {};
                 self.depth += 1;

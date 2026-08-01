@@ -124,7 +124,7 @@ pub inline fn event(comptime level: Level, comptime name: []const u8, args: anyt
         var field_buf: [8]Field = undefined;
         const fields = toFields(fields_info, args, &field_buf);
         tracing.dispatch(.{
-            .kind = .event,
+            .kind = .{ .event = level },
             .name = name,
             .fields = fields,
             .timestamp = rdtsc_.rdtsc(),
